@@ -56,4 +56,5 @@ def olivettiDL():
     print(f"Saved {len(images)} images to: {OUTPUT_DIR.resolve()}")
 
 if __name__ == "__main__":
-    main()
+    digitDL()
+    olivettiDL()
