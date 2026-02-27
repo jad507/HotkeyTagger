@@ -27,3 +27,5 @@ env/
 
 # Saved session state (user-specific)
 hotkey_settings.json
+olivetti_faces_flat/
+digits_images_flat/
