@@ -9,7 +9,8 @@ Workflow
 --------
 1. Click **Open Folder** and choose a directory that contains your images.
 2. Click **Configure Hotkeys** to bind single-key shortcuts to tag names
-   (e.g. `g` → `galaxy`, `s` → `star`).
+   (e.g. `g` → `galaxy`, `s` → `star`). You can enter multiple keys per tag
+   like `5,q` or `5q`.
 3. Press the hotkeys while browsing images to toggle tags.
 4. Click **Save CSV** (or let the close-dialog do it automatically) to write
    `tags.csv` in the chosen image folder.
@@ -18,14 +19,14 @@ Workflow
 
 On next launch the app restores the last folder and index (if available), and
 will load per-folder hotkeys from `hotkeys.json` when a folder is opened.
+If a folder lacks `hotkeys.json`, the hotkey map starts blank.
 """
 
 from __future__ import annotations
 
 import json
-import sys
-from typing import Dict, List, Optional
 from pathlib import Path
+from typing import Dict, List, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence
@@ -47,13 +48,18 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QShortcut,
+    QCheckBox
 )
 
 from csv_manager import load_tags, repair_csv, save_tags
 from settings import DEFAULT_SETTINGS_PATH, HotkeySettings
 
 
-# File extensions treated as images
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+
+# File extensions treated as images (non-recursive listing)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".fits"}
 
 # Per-folder hotkeys file name
@@ -61,11 +67,68 @@ HOTKEYS_FILENAME = "hotkeys.json"
 
 
 # --------------------------------------------------------------------------- #
+# Utilities for multi-key bindings and safe UI handling
+# --------------------------------------------------------------------------- #
+
+RESERVED_KEYS = {"left", "right"}  # handled via QShortcuts (navigation)
+RESERVED_CHARS = {" ", "\r", "\n", "\t"}  # whitespace variants
+
+
+def group_keys_by_tag(hotkey_map: Dict[str, str]) -> Dict[str, List[str]]:
+    """Invert key->tag to tag->sorted unique list(keys), stable order."""
+    by_tag: Dict[str, List[str]] = {}
+    for k, tag in hotkey_map.items():
+        by_tag.setdefault(tag, []).append(k)
+    for tag in by_tag:
+        # sort case-insensitively, dedupe preserving order
+        seen: List[str] = []
+        for k in sorted(by_tag[tag], key=lambda x: (x.lower(), x)):
+            if k not in seen:
+                seen.append(k)
+        by_tag[tag] = seen
+    # sort tags for stable display
+    return dict(sorted(by_tag.items(), key=lambda kv: kv[0].lower()))
+
+
+def parse_keys_field(s: str) -> List[str]:
+    """
+    Parse a keys cell like '5,q' or '5q' into a list of single-character keys.
+    - Lowercases.
+    - Comma-separated; if no commas, splits into characters.
+    - Strips whitespace.
+    - Deduplicates preserving order.
+    - Skips reserved/whitespace characters and multi-char tokens.
+    """
+    s = (s or "").strip()
+    if not s:
+        return []
+    if "," in s:
+        parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+    else:
+        parts = [ch.lower() for ch in s.replace(" ", "")]
+    clean: List[str] = []
+    for k in parts:
+        if len(k) != 1:
+            continue  # drop tokens like "enter"
+        if k in RESERVED_CHARS:
+            continue
+        clean.append(k)
+    # dedupe preserving order
+    seen = set()
+    out: List[str] = []
+    for k in clean:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Hotkey configuration dialog
 # --------------------------------------------------------------------------- #
 
 class HotkeyConfigDialog(QDialog):
-    """Dialog that lets the user map single keys to tag names."""
+    """Dialog that lets the user map single or multiple keys to a tag."""
 
     def __init__(self, hotkey_map: Dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -77,27 +140,32 @@ class HotkeyConfigDialog(QDialog):
 
         # Instruction label
         instructions = QLabel(
-            "Map a single key to a tag name. "
-            "Press a key while viewing an image to toggle that tag."
+            "Map keys to a tag. You can enter multiple keys per row like '5,q' or '5q'.\n"
+            "Reserved navigation keys (Left/Right/Space/Enter) are not allowed."
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
 
-        # Two-column table: Key | Tag Name
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Key", "Tag Name"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        # Two-column table: Key(s) | Tag Name
+        self.table = QTableWidget(0, 2, self)
+        self.table.setHorizontalHeaderLabels(["Key(s)", "Tag Name"])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
 
-        for key, tag in sorted(hotkey_map.items()):
-            self._add_row(key, tag)
+        # Aggregate existing map into rows (keys grouped by tag)
+        by_tag = group_keys_by_tag(hotkey_map)
+        for tag, keys in by_tag.items():
+            keys_text = ",".join(keys)
+            self._add_row(keys_text, tag)
+
         layout.addWidget(self.table)
 
         # Row management buttons
         btn_row = QHBoxLayout()
-        add_btn = QPushButton("Add Row")
+        add_btn = QPushButton("Add Row", self)
         add_btn.clicked.connect(self._add_empty_row)
-        remove_btn = QPushButton("Remove Selected Row")
+        remove_btn = QPushButton("Remove Selected Row", self)
         remove_btn.clicked.connect(self._remove_selected_row)
         btn_row.addWidget(add_btn)
         btn_row.addWidget(remove_btn)
@@ -105,39 +173,69 @@ class HotkeyConfigDialog(QDialog):
         layout.addLayout(btn_row)
 
         # OK / Cancel
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self.setMinimumWidth(420)
-        self.setMinimumHeight(300)
+        self.setMinimumWidth(460)
+        self.setMinimumHeight(320)
 
-    def _add_row(self, key: str = "", tag: str = "") -> None:
+    def _add_row(self, keys: str = "", tag: str = "") -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
-        self.table.setItem(row, 0, QTableWidgetItem(key))
+        self.table.setItem(row, 0, QTableWidgetItem(keys))
         self.table.setItem(row, 1, QTableWidgetItem(tag))
 
     def _add_empty_row(self) -> None:
         self._add_row()
 
     def _remove_selected_row(self) -> None:
-        selected = self.table.selectedItems()
-        if selected:
-            self.table.removeRow(selected[0].row())
+        # Be robust if selection spans multiple cells/rows
+        selected = self.table.selectedRanges()
+        if not selected:
+            return
+        for r in reversed(selected):
+            for row in range(r.topRow(), r.bottomRow() + 1):
+                if 0 <= row < self.table.rowCount():
+                    self.table.removeRow(row)
 
     def get_hotkey_map(self) -> Dict[str, str]:
-        """Return the validated hotkey→tag mapping from the table."""
+        """
+        Return a flattened key->tag map.
+        Accepts '5,q' or '5q' in the Key(s) column.
+        Skips invalid/reserved entries and resolves duplicates by 'last row wins'.
+        """
         result: Dict[str, str] = {}
+        conflicts: List[str] = []
+
         for row in range(self.table.rowCount()):
             key_item = self.table.item(row, 0)
             tag_item = self.table.item(row, 1)
-            if key_item and tag_item:
-                key = key_item.text().strip().lower()
-                tag = tag_item.text().strip()
-                if key and tag:
-                    result[key] = tag
+            if not key_item or not tag_item:
+                continue
+
+            keys_raw = key_item.text()
+            tag = (tag_item.text() or "").strip()
+            if not tag:
+                continue
+
+            keys = parse_keys_field(keys_raw)
+            # Disallow space/enter even if typed as characters (safety)
+            filtered = [k for k in keys if k not in RESERVED_CHARS]
+
+            for k in filtered:
+                if k in result and result[k] != tag:
+                    conflicts.append(f"'{k}' (was '{result[k]}', now '{tag}')")
+                result[k] = tag
+
+        if conflicts:
+            QMessageBox.warning(
+                self,
+                "Key Conflicts",
+                "Some keys were rebound to different tags:\n" + "\n".join(conflicts)
+            )
+
         return result
 
 
@@ -214,13 +312,21 @@ class HotkeyTagger(QMainWindow):
         nav = QHBoxLayout()
         prev_btn = QPushButton("◀ Prev")
         prev_btn.clicked.connect(self.prev_image)
-        next_btn = QPushButton("Next ▶")
-        next_btn.clicked.connect(self.next_image)
+
+        self.next_btn = QPushButton("Next ▶")  # keep a reference; we change its label
+        self.next_btn.clicked.connect(self.next_action)
+
+        # NEW: checkbox to toggle "next untagged" mode
+        self.chk_next_untagged = QCheckBox("Next = untagged")
+        self.chk_next_untagged.stateChanged.connect(self._on_next_mode_changed)
+
         self.progress_label = QLabel("0 / 0")
         self.progress_label.setAlignment(Qt.AlignCenter)
+
         nav.addWidget(prev_btn)
         nav.addWidget(self.progress_label, stretch=1)
-        nav.addWidget(next_btn)
+        nav.addWidget(self.chk_next_untagged)  # <-- add checkbox in the row
+        nav.addWidget(self.next_btn)
         main_layout.addLayout(nav)
 
         # ---- Tags display ----
@@ -247,6 +353,7 @@ class HotkeyTagger(QMainWindow):
 
     def _init_shortcuts(self) -> None:
         """Register navigation shortcuts (Prev/Next)."""
+
         def add(seq: str, fn):
             sc = QShortcut(QKeySequence(seq), self)
             sc.activated.connect(fn)
@@ -254,12 +361,12 @@ class HotkeyTagger(QMainWindow):
 
         # Previous / Next
         add("Left", self.prev_image)
-        add("Right", self.next_image)
+        add("Right", self.next_action)
 
         # Also advance with Space and Enter/Return
-        add("Space", self.next_image)
-        add("Return", self.next_image)
-        add("Enter", self.next_image)
+        add("Space", self.next_action)
+        add("Return", self.next_action)
+        add("Enter", self.next_action)
 
     # ------------------------------------------------------------------ #
     # Session restore
@@ -287,8 +394,8 @@ class HotkeyTagger(QMainWindow):
                         # Load tags (relative Paths) and repair CSV schema
                         self.tags_dict = load_tags(csv_path)
                         repair_csv(csv_path)
-                        # >>> REFRESH DISPLAY NOW THAT TAGS ARE LOADED <<<
-                        self._show_current_image()  # <--- add this line
+                        # Refresh display now that tags are loaded
+                        self._show_current_image()
 
                 # Load per-folder hotkeys (blank if none)
                 self._load_folder_hotkeys()
@@ -296,10 +403,8 @@ class HotkeyTagger(QMainWindow):
                 idx = self.settings.last_image_index
                 if 0 <= idx < len(self.image_files):
                     self.current_index = idx
-                    # show image at restored index with tags
-                    self._show_current_image()  # ensure correct image/tag combo
+                    self._show_current_image()
                 elif self.image_files:
-                    # already refreshed above, but safe to ensure display is correct
                     self._show_current_image()
 
                 if self.image_files:
@@ -339,10 +444,10 @@ class HotkeyTagger(QMainWindow):
         if self.csv_path.exists():
             self.tags_dict = load_tags(self.csv_path)
             repair_csv(self.csv_path)
-            # >>> REFRESH DISPLAY NOW THAT TAGS ARE LOADED <<<
-            self._show_current_image()  # <--- add this line
+            # Refresh display now that tags are loaded
+            self._show_current_image()
 
-        # Load this folder's hotkeys (if present) or blank if not
+        # Load this folder's hotkeys (blank if not present)
         self._load_folder_hotkeys()
 
         # Persist last folder / csv path
@@ -370,8 +475,6 @@ class HotkeyTagger(QMainWindow):
     # Helpers for per-folder hotkeys
     def _hotkeys_path(self) -> Optional[Path]:
         return self.folder / HOTKEYS_FILENAME if self.folder else None
-
-    # --- Replace this method in HotkeyTagger ---
 
     def _load_folder_hotkeys(self) -> None:
         """Reset hotkeys to blank, then load this folder's hotkeys.json if present."""
@@ -450,6 +553,61 @@ class HotkeyTagger(QMainWindow):
             self._show_current_image()
             self.settings.last_image_index = self.current_index
 
+    def _on_next_mode_changed(self, state) -> None:
+        """Update the Next button label when the mode changes."""
+        if self.chk_next_untagged.isChecked():
+            self.next_btn.setText("Next Untagged ▶")
+            self.status_bar.showMessage("Next mode: jump to next untagged image")
+        else:
+            self.next_btn.setText("Next ▶")
+            self.status_bar.showMessage("Next mode: sequential")
+
+    def next_action(self) -> None:
+        """Delegate to sequential next or next-untagged based on checkbox."""
+        if self.chk_next_untagged.isChecked():
+            self.next_untagged()
+        else:
+            self.next_image()
+
+    def _is_current_tagged(self) -> bool:
+        """Return True if the current image has any tags."""
+        rel = self._current_relpath()
+        if rel is None:
+            return False
+        tags = self.tags_dict.get(rel, [])
+        return bool(tags)
+
+    def next_untagged(self) -> None:
+        """Jump to the next image (after current) that has no tags."""
+        if not self.image_files:
+            return
+
+        start = self.current_index + 1
+        found = None
+        for i in range(start, len(self.image_files)):
+            rel = self._relpath_for_index(i)
+            if rel is not None and not self.tags_dict.get(rel, []):
+                found = i
+                break
+
+        if found is None:
+            self.status_bar.showMessage("No untagged images ahead")
+            return
+
+        self.current_index = found
+        self._show_current_image()
+        self.settings.last_image_index = self.current_index
+
+    def _relpath_for_index(self, idx: int) -> Optional[Path]:
+        """Get the relative-path key for tags_dict for the given image index."""
+        if not self.folder or not (0 <= idx < len(self.image_files)):
+            return None
+        abs_path = self.image_files[idx]
+        try:
+            return abs_path.relative_to(self.folder)
+        except ValueError:
+            return Path(abs_path.name)
+
     # ------------------------------------------------------------------ #
     # Tagging
     # ------------------------------------------------------------------ #
@@ -486,11 +644,21 @@ class HotkeyTagger(QMainWindow):
 
     def configure_hotkeys(self) -> None:
         dialog = HotkeyConfigDialog(self.settings.hotkey_map, self)
-        if dialog.exec_() == QDialog.Accepted:
-            self.settings.hotkey_map = dialog.get_hotkey_map()
-            self._update_hotkey_hint()
-            self._save_folder_hotkeys()  # persist to this folder immediately
-            self.status_bar.showMessage("Hotkeys updated")
+        try:
+            result = dialog.exec_()  # modal; returns QDialog.Accepted/Rejected
+        except Exception as e:
+            QMessageBox.critical(self, "Configure Hotkeys", f"Dialog failed:\n{e}")
+            return
+
+        if result == QDialog.Accepted:
+            try:
+                new_map = dialog.get_hotkey_map()
+                self.settings.hotkey_map = new_map
+                self._update_hotkey_hint()
+                self._save_folder_hotkeys()  # write to this folder's hotkeys.json
+                self.status_bar.showMessage("Hotkeys updated")
+            except Exception as e:
+                QMessageBox.critical(self, "Configure Hotkeys", f"Failed to apply hotkeys:\n{e}")
 
     # ------------------------------------------------------------------ #
     # Save / export
@@ -547,8 +715,9 @@ class HotkeyTagger(QMainWindow):
 
     def _update_hotkey_hint(self) -> None:
         if self.settings.hotkey_map:
-            hints = "  ".join(f"[{k}] → {v}" for k, v in sorted(self.settings.hotkey_map.items()))
-            self.hotkey_hint.setText(f"Hotkeys: {hints}")
+            by_tag = group_keys_by_tag(self.settings.hotkey_map)
+            chunks = [f"[{','.join(keys)}] → {tag}" for tag, keys in by_tag.items()]
+            self.hotkey_hint.setText("Hotkeys:  " + "    ".join(chunks))
         else:
             self.hotkey_hint.setText(
                 'No hotkeys configured. Click "Configure Hotkeys" to set them up.'
@@ -580,6 +749,8 @@ class HotkeyTagger(QMainWindow):
 # --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
+    import sys
+
     app = QApplication(sys.argv)
     window = HotkeyTagger()
     window.show()
