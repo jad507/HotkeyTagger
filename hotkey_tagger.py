@@ -13,21 +13,22 @@ Workflow
 3. Press the hotkeys while browsing images to toggle tags.
 4. Click **Save CSV** (or let the close-dialog do it automatically) to write
    `tags.csv` in the chosen image folder.
-5. Click **Save Settings** to persist your hotkey map and current position so
-   you can resume the session later.
+5. Click **Save Settings** to persist your current position and write this
+   folder's hotkeys to `hotkeys.json`.
 
-On next launch the application automatically restores the last folder, CSV,
-and image index (if the settings file is present).
+On next launch the app restores the last folder and index (if available), and
+will load per-folder hotkeys from `hotkeys.json` when a folder is opened.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Dict, List, Optional
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtGui import QFont, QPixmap, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -45,6 +46,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+    QShortcut,
 )
 
 from csv_manager import load_tags, repair_csv, save_tags
@@ -53,6 +55,9 @@ from settings import DEFAULT_SETTINGS_PATH, HotkeySettings
 
 # File extensions treated as images
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".fits"}
+
+# Per-folder hotkeys file name
+HOTKEYS_FILENAME = "hotkeys.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +164,11 @@ class HotkeyTagger(QMainWindow):
         self.current_index: int = 0
         self.csv_path: Optional[Path] = None
 
+        # Hold shortcuts to keep them from being GC'd
+        self._shortcuts: List[QShortcut] = []
+
         self._init_ui()
+        self._init_shortcuts()
         self._auto_restore()
 
     # ------------------------------------------------------------------ #
@@ -236,6 +245,22 @@ class HotkeyTagger(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Ready")
 
+    def _init_shortcuts(self) -> None:
+        """Register navigation shortcuts (Prev/Next)."""
+        def add(seq: str, fn):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.activated.connect(fn)
+            self._shortcuts.append(sc)
+
+        # Previous / Next
+        add("Left", self.prev_image)
+        add("Right", self.next_image)
+
+        # Also advance with Space and Enter/Return
+        add("Space", self.next_image)
+        add("Return", self.next_image)
+        add("Enter", self.next_image)
+
     # ------------------------------------------------------------------ #
     # Session restore
     # ------------------------------------------------------------------ #
@@ -275,27 +300,47 @@ class HotkeyTagger(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def open_folder(self) -> None:
+        # Choose new folder
         folder_str = QFileDialog.getExistingDirectory(self, "Select Image Folder")
         if not folder_str:
             return
+        new_folder = Path(folder_str)
 
-        folder = Path(folder_str)
-        self._load_folder(folder)
+        # If switching away from an open folder, save current CSV and folder hotkeys
+        if self.folder and self.csv_path:
+            try:
+                if self.tags_dict:
+                    save_tags(self.csv_path, self.tags_dict)
+                self._save_folder_hotkeys()
+            except Exception as e:
+                QMessageBox.warning(self, "Warning", f"Failed to save current folder state:\n{e}")
+
+        # Clear in-memory state before loading the next folder
+        self.tags_dict = {}
+        self.image_files = []
+        self.current_index = 0
+        self.csv_path = None
+
+        # Load new folder
+        self._load_folder(new_folder)
 
         # Default CSV path next to images
-        self.csv_path = folder / "tags.csv"
+        self.csv_path = new_folder / "tags.csv"
         if self.csv_path.exists():
             self.tags_dict = load_tags(self.csv_path)
             repair_csv(self.csv_path)
 
-        # Persist paths to settings (use POSIX for portability)
-        self.settings.last_folder = folder.as_posix()
+        # Load this folder's hotkeys (if present)
+        self._load_folder_hotkeys()
+
+        # Persist last folder / csv path
+        self.settings.last_folder = new_folder.as_posix()
         self.settings.last_csv_path = self.csv_path.as_posix() if self.csv_path else ""
 
     def _load_folder(self, folder: Path) -> None:
         self.folder = folder
 
-        # Non-recursive listing (match prior behavior)
+        # Non-recursive listing
         self.image_files = sorted(
             [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS],
             key=lambda p: p.name.lower(),
@@ -310,6 +355,41 @@ class HotkeyTagger(QMainWindow):
             self.status_bar.showMessage("No images found")
             self._update_progress()
 
+    # Helpers for per-folder hotkeys
+    def _hotkeys_path(self) -> Optional[Path]:
+        return self.folder / HOTKEYS_FILENAME if self.folder else None
+
+    # --- Replace this method in HotkeyTagger ---
+
+    def _load_folder_hotkeys(self) -> None:
+        """Reset hotkeys to blank, then load this folder's hotkeys.json if present."""
+        # Always start with a blank map
+        self.settings.hotkey_map = {}
+
+        p = self._hotkeys_path()
+        if p and p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    # Normalize keys to lower-case single characters
+                    self.settings.hotkey_map = {str(k).lower(): str(v) for k, v in data.items()}
+                    self.status_bar.showMessage(f"Loaded hotkeys from {p.name}")
+            except Exception as e:
+                QMessageBox.warning(self, "Hotkeys", f"Failed to load {p}:\n{e}")
+
+        # Reflect the current (possibly blank) map in the UI
+        self._update_hotkey_hint()
+
+    def _save_folder_hotkeys(self) -> None:
+        """Save current hotkeys into this folder's hotkeys.json."""
+        p = self._hotkeys_path()
+        if not p:
+            return
+        try:
+            p.write_text(json.dumps(self.settings.hotkey_map, indent=2), encoding="utf-8")
+        except Exception as e:
+            QMessageBox.warning(self, "Hotkeys", f"Failed to save {p}:\n{e}")
+
     # Helper: relative path for the *current* image (key in tags_dict)
     def _current_relpath(self) -> Optional[Path]:
         if not self.folder or not self.image_files:
@@ -320,7 +400,7 @@ class HotkeyTagger(QMainWindow):
             return abs_path.relative_to(self.folder)
         except ValueError:
             # Fallback if outside (shouldn't happen)
-            return abs_path.name  # type: ignore[return-value]
+            return Path(abs_path.name)
 
     def _show_current_image(self) -> None:
         if not self.image_files:
@@ -397,6 +477,7 @@ class HotkeyTagger(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self.settings.hotkey_map = dialog.get_hotkey_map()
             self._update_hotkey_hint()
+            self._save_folder_hotkeys()  # persist to this folder immediately
             self.status_bar.showMessage("Hotkeys updated")
 
     # ------------------------------------------------------------------ #
@@ -422,10 +503,11 @@ class HotkeyTagger(QMainWindow):
         self.settings.last_csv_path = self.csv_path.as_posix()
 
     def save_settings(self) -> None:
+        # Save image index and per-folder hotkeys
         self.settings.last_image_index = self.current_index
-        # Store folder in settings as POSIX string for portability
         if self.folder:
             self.settings.last_folder = self.folder.as_posix()
+        self._save_folder_hotkeys()
         self.settings.save(DEFAULT_SETTINGS_PATH)
         self.status_bar.showMessage("Settings saved")
 
