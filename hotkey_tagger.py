@@ -287,12 +287,22 @@ class HotkeyTagger(QMainWindow):
                         # Load tags (relative Paths) and repair CSV schema
                         self.tags_dict = load_tags(csv_path)
                         repair_csv(csv_path)
+                        # >>> REFRESH DISPLAY NOW THAT TAGS ARE LOADED <<<
+                        self._show_current_image()  # <--- add this line
+
+                # Load per-folder hotkeys (blank if none)
+                self._load_folder_hotkeys()
 
                 idx = self.settings.last_image_index
                 if 0 <= idx < len(self.image_files):
                     self.current_index = idx
-                if self.image_files:
+                    # show image at restored index with tags
+                    self._show_current_image()  # ensure correct image/tag combo
+                elif self.image_files:
+                    # already refreshed above, but safe to ensure display is correct
                     self._show_current_image()
+
+                if self.image_files:
                     self.status_bar.showMessage(f"Resumed session from {folder}")
 
     # ------------------------------------------------------------------ #
@@ -321,7 +331,7 @@ class HotkeyTagger(QMainWindow):
         self.current_index = 0
         self.csv_path = None
 
-        # Load new folder
+        # Load new folder (this will show the first image once)
         self._load_folder(new_folder)
 
         # Default CSV path next to images
@@ -329,8 +339,10 @@ class HotkeyTagger(QMainWindow):
         if self.csv_path.exists():
             self.tags_dict = load_tags(self.csv_path)
             repair_csv(self.csv_path)
+            # >>> REFRESH DISPLAY NOW THAT TAGS ARE LOADED <<<
+            self._show_current_image()  # <--- add this line
 
-        # Load this folder's hotkeys (if present)
+        # Load this folder's hotkeys (if present) or blank if not
         self._load_folder_hotkeys()
 
         # Persist last folder / csv path
