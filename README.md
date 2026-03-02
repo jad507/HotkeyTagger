@@ -5,6 +5,7 @@ This project was built for a short 3 hour hackathon run by [c0mpiled and the Pen
 Simply run HotkeyTagger.py, and point it at a folder of images to get started. 
 The hotkeys are customizable, and the classifications are saved in a csv file in the same folder as the images. 
 You should be able to add keybindings at anytime without the csv breaking, and the purpose of the program is to more quickly and easily classify images for later use in supervised machine learning. 
+The project is built in python, making use of pyQT5 for the GUI.
 
 A brief (rushed, due to time constraints) demo: https://www.youtube.com/watch?v=62CccaczzBQ
 A brief slidedeck overviewing the project and its features: https://pennstateoffice365-my.sharepoint.com/:p:/g/personal/jad507_psu_edu/IQBQE9y4SEuzTJRWDDnQN1taAfqEADTHDavQ7fp_GkdA6D0?e=zjhQbf
