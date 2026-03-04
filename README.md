@@ -30,3 +30,4 @@ Ultimately, it remained a solo proejct, and was made with the help of Github Cop
 Part of the inspiration for the project was League of Legends, which standardized hotkey bindings to the qwer keys, compared to its predecessor, DotA.
 I did not win any prizes during this hackathon, but I hope that this project can be of use to others (and I will definitely be using it, and may work on further improvements).
 I believe it to be platform agnostic, due to the use of Path, but have not tested it on anything except my local Windows machine.
+Event summary, with links to other teams and projects: https://www.compiled.sh/articles/c0mpiled-6-ai-for-productivity-research
