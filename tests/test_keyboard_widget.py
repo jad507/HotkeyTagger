@@ -153,3 +153,97 @@ def test_keyboard_widget_total_button_count():
     kb = KeyboardWidget({})
     total_keys = sum(len(row) for row in KEYBOARD_LAYOUT)
     assert len(kb._buttons) == total_keys
+
+
+# ---------------------------------------------------------------------------
+# HotkeyConfigDialog – sort and load-from-file features
+# ---------------------------------------------------------------------------
+
+import json
+import tempfile
+import os as _os
+
+from hotkey_tagger import HotkeyConfigDialog, parse_keys_field
+
+
+def test_sort_by_tag_alphabetical():
+    """_sort_by_tag reorders rows alphabetically by tag name."""
+    dlg = HotkeyConfigDialog({"z": "zebra", "a": "apple", "m": "mango"})
+    dlg._sort_by_tag()
+    tags = [dlg.table.item(r, 1).text() for r in range(dlg.table.rowCount())]
+    assert tags == sorted(tags, key=str.lower)
+
+
+def test_sort_by_key_keyboard_order():
+    """_sort_by_key places '1'-keyed tag before 'q'-keyed tag before 'a'-keyed tag."""
+    hotkey_map = {"a": "asdf_tag", "q": "qwerty_tag", "1": "number_tag"}
+    dlg = HotkeyConfigDialog(hotkey_map)
+    dlg._sort_by_key()
+    tags = [dlg.table.item(r, 1).text() for r in range(dlg.table.rowCount())]
+    # number row ('1') < qwerty row ('q') < asdf row ('a') in KEYBOARD_ORDER
+    assert tags.index("number_tag") < tags.index("qwerty_tag")
+    assert tags.index("qwerty_tag") < tags.index("asdf_tag")
+
+
+def test_sort_by_key_zxcv_after_asdf():
+    """Keys in the ZXCV row sort after the ASDF row."""
+    hotkey_map = {"z": "zxcv_tag", "f": "asdf_tag"}
+    dlg = HotkeyConfigDialog(hotkey_map)
+    dlg._sort_by_key()
+    tags = [dlg.table.item(r, 1).text() for r in range(dlg.table.rowCount())]
+    assert tags.index("asdf_tag") < tags.index("zxcv_tag")
+
+
+def test_sort_by_tag_case_insensitive():
+    """_sort_by_tag treats uppercase and lowercase tag names equivalently."""
+    dlg = HotkeyConfigDialog({"c": "Charlie", "a": "alice", "b": "Bob"})
+    dlg._sort_by_tag()
+    tags = [dlg.table.item(r, 1).text() for r in range(dlg.table.rowCount())]
+    assert tags == sorted(tags, key=str.lower)
+
+
+def test_load_from_file_populates_table(tmp_path):
+    """_load_from_file replaces the table contents with the imported map."""
+    hotkeys_file = tmp_path / "hotkeys.json"
+    hotkeys_file.write_text(json.dumps({"g": "galaxy", "s": "star"}), encoding="utf-8")
+
+    dlg = HotkeyConfigDialog({})
+    assert dlg.table.rowCount() == 0
+
+    # Simulate the file-load logic directly (bypasses QFileDialog)
+    data = json.loads(hotkeys_file.read_text(encoding="utf-8"))
+    from hotkey_tagger import group_keys_by_tag
+    hotkey_map = {str(k).lower(): str(v) for k, v in data.items() if len(str(k)) == 1}
+    by_tag = group_keys_by_tag(hotkey_map)
+    rows = [(",".join(keys), tag) for tag, keys in by_tag.items()]
+    dlg._populate_table(rows)
+
+    all_tags = {dlg.table.item(r, 1).text() for r in range(dlg.table.rowCount())}
+    assert all_tags == {"galaxy", "star"}
+
+
+def test_load_from_file_replaces_existing_rows(tmp_path):
+    """_load_from_file (via _populate_table) replaces existing rows entirely."""
+    hotkeys_file = tmp_path / "hotkeys.json"
+    hotkeys_file.write_text(json.dumps({"n": "nebula"}), encoding="utf-8")
+
+    dlg = HotkeyConfigDialog({"g": "galaxy", "s": "star"})
+    assert dlg.table.rowCount() == 2
+
+    data = json.loads(hotkeys_file.read_text(encoding="utf-8"))
+    from hotkey_tagger import group_keys_by_tag
+    hotkey_map = {str(k).lower(): str(v) for k, v in data.items() if len(str(k)) == 1}
+    by_tag = group_keys_by_tag(hotkey_map)
+    rows = [(",".join(keys), tag) for tag, keys in by_tag.items()]
+    dlg._populate_table(rows)
+
+    assert dlg.table.rowCount() == 1
+    assert dlg.table.item(0, 1).text() == "nebula"
+
+
+def test_extract_rows_returns_all_cells():
+    """_extract_rows reflects the current table contents accurately."""
+    dlg = HotkeyConfigDialog({"g": "galaxy", "s": "star"})
+    rows = dlg._extract_rows()
+    all_tags = {r[1] for r in rows}
+    assert all_tags == {"galaxy", "star"}

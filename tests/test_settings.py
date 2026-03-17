@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -33,7 +34,7 @@ def test_save_and_load_roundtrip():
     s.last_csv_path = "/data/images/tags.csv"
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
 
     try:
         s.save(path)
@@ -52,7 +53,7 @@ def test_save_and_load_roundtrip():
 
 def test_load_returns_false_for_missing_file():
     s = HotkeySettings()
-    assert s.load("/nonexistent/path/settings.json") is False
+    assert s.load(Path("/nonexistent/path/settings.json")) is False
 
 
 def test_load_returns_false_for_corrupt_json():
@@ -60,7 +61,7 @@ def test_load_returns_false_for_corrupt_json():
         suffix=".json", delete=False, mode="w"
     ) as f:
         f.write("not valid json {{")
-        path = f.name
+        path = Path(f.name)
     try:
         s = HotkeySettings()
         assert s.load(path) is False
@@ -72,7 +73,7 @@ def test_save_produces_valid_json():
     s = HotkeySettings()
     s.hotkey_map = {"n": "nebula"}
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
     try:
         s.save(path)
         with open(path) as fh:
@@ -91,7 +92,7 @@ def test_load_partial_json_uses_defaults():
         suffix=".json", delete=False, mode="w"
     ) as f:
         json.dump({"hotkey_map": {"x": "xray"}}, f)
-        path = f.name
+        path = Path(f.name)
     try:
         s = HotkeySettings()
         assert s.load(path) is True
@@ -107,7 +108,7 @@ def test_hotkey_map_survives_multiple_saves():
     s = HotkeySettings()
     s.hotkey_map = {"a": "asteroid", "b": "binary_star"}
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
     try:
         s.save(path)
         s.hotkey_map["c"] = "comet"
