@@ -28,7 +28,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -72,6 +72,37 @@ HOTKEYS_FILENAME = "hotkeys.json"
 
 RESERVED_KEYS = {"left", "right"}  # handled via QShortcuts (navigation)
 RESERVED_CHARS = {" ", "\r", "\n", "\t"}  # whitespace variants
+
+# --------------------------------------------------------------------------- #
+# QWERTY keyboard layout
+# --------------------------------------------------------------------------- #
+
+# Four rows of keys in standard QWERTY order (lowercase for map lookups).
+KEYBOARD_LAYOUT: List[List[str]] = [
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "="],
+    ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]"],
+    ["a", "s", "d", "f", "g", "h", "j", "k", "l", ";", "'"],
+    ["z", "x", "c", "v", "b", "n", "m", ",", ".", "/"],
+]
+
+# Flat ordered index for each key (used for keyboard-order sorting later).
+KEYBOARD_ORDER: Dict[str, int] = {
+    key: idx
+    for idx, key in enumerate(k for row in KEYBOARD_LAYOUT for k in row)
+}
+
+# Row stagger offsets (fraction of one key+gap width) mirroring a real keyboard.
+_KEY_ROW_OFFSETS = [0.0, 0.5, 0.75, 1.0]
+
+# Key state colours
+_KEY_COLOR_ASSIGNED = "#96BEE6"
+_KEY_COLOR_UNASSIGNED = "#CCCCCC"
+_KEY_COLOR_PRESSED = "#001E44"
+
+# Default key button dimensions (pixels)
+_KEY_W = 64
+_KEY_H = 56
+_KEY_GAP = 3
 
 
 def group_keys_by_tag(hotkey_map: Dict[str, str]) -> Dict[str, List[str]]:
@@ -124,6 +155,127 @@ def parse_keys_field(s: str) -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
+# QWERTY keyboard widget
+# --------------------------------------------------------------------------- #
+
+class KeyboardWidget(QWidget):
+    """Displays a QWERTY keyboard layout showing hotkey assignments.
+
+    Unassigned keys are greyed out and non-interactive.  Assigned keys are
+    highlighted light-blue and emit :attr:`key_clicked` when the user clicks
+    them.  Call :meth:`update_map` whenever the underlying hotkey map changes.
+
+    The widget is intentionally data-driven: all colour/label logic lives in
+    :meth:`_refresh_button` so future per-tag colour schemes can be added with
+    minimal changes.
+    """
+
+    key_clicked = pyqtSignal(str)  # emits the lowercase key character
+
+    def __init__(
+        self,
+        hotkey_map: Dict[str, str],
+        parent=None,
+        key_w: int = _KEY_W,
+        key_h: int = _KEY_H,
+    ) -> None:
+        super().__init__(parent)
+        self._hotkey_map: Dict[str, str] = dict(hotkey_map)
+        self._buttons: Dict[str, QPushButton] = {}
+        self._key_w = key_w
+        self._key_h = key_h
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setSpacing(_KEY_GAP)
+        outer.setContentsMargins(4, 4, 4, 4)
+
+        for row_idx, row_keys in enumerate(KEYBOARD_LAYOUT):
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(_KEY_GAP)
+
+            # Stagger each row to mimic a real keyboard
+            offset_px = int(_KEY_ROW_OFFSETS[row_idx] * (self._key_w + _KEY_GAP))
+            if offset_px:
+                row_layout.addSpacing(offset_px)
+
+            for key in row_keys:
+                btn = QPushButton(self)
+                btn.setFixedSize(self._key_w, self._key_h)
+                # Multi-line button text is achieved via embedded '\n'; Qt5
+                # renders each line centred within the button automatically.
+                font = QFont()
+                font.setPointSize(8)
+                btn.setFont(font)
+                self._buttons[key] = btn
+                # lambda default-captures key to avoid late-binding closure
+                btn.clicked.connect(
+                    lambda _checked=False, k=key: self.key_clicked.emit(k)
+                )
+                row_layout.addWidget(btn)
+
+            row_layout.addStretch()
+            outer.addLayout(row_layout)
+
+        self._update_all_buttons()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def update_map(self, hotkey_map: Dict[str, str]) -> None:
+        """Refresh the keyboard display with a new hotkey mapping."""
+        self._hotkey_map = dict(hotkey_map)
+        self._update_all_buttons()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _update_all_buttons(self) -> None:
+        for key, btn in self._buttons.items():
+            self._refresh_button(key, btn)
+
+    def _refresh_button(self, key: str, btn: QPushButton) -> None:
+        """Apply the correct visual state (colour + label) for *key*."""
+        tag = self._hotkey_map.get(key)
+        display = key.upper()
+
+        if tag:
+            # Show key label on the first line, tag name below
+            btn.setText(f"{display}\n{tag}")
+            btn.setToolTip(f"Key: {display}  →  Tag: {tag}")
+            btn.setEnabled(True)
+            btn.setStyleSheet(
+                f"QPushButton {{"
+                f"  background-color: {_KEY_COLOR_ASSIGNED};"
+                f"  border: 1px solid #5599CC;"
+                f"  border-radius: 4px;"
+                f"  font-size: 8pt;"
+                f"  padding: 2px;"
+                f"}}"
+                f"QPushButton:pressed {{"
+                f"  background-color: {_KEY_COLOR_PRESSED};"
+                f"  color: #FFFFFF;"
+                f"}}"
+            )
+        else:
+            btn.setText(display)
+            btn.setToolTip("")
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                f"QPushButton:disabled {{"
+                f"  background-color: {_KEY_COLOR_UNASSIGNED};"
+                f"  border: 1px solid #999;"
+                f"  border-radius: 4px;"
+                f"  color: #888;"
+                f"  font-size: 8pt;"
+                f"}}"
+            )
+
+
+# --------------------------------------------------------------------------- #
 # Hotkey configuration dialog
 # --------------------------------------------------------------------------- #
 
@@ -138,7 +290,15 @@ class HotkeyConfigDialog(QDialog):
     def _init_ui(self, hotkey_map: Dict[str, str]) -> None:
         layout = QVBoxLayout(self)
 
-        # Instruction label
+        # ---- Keyboard preview (QWERTY layout) ----
+        kb_label = QLabel("Keyboard preview (updates as you edit the table below):")
+        kb_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(kb_label)
+
+        self._keyboard_widget = KeyboardWidget(hotkey_map, parent=self, key_w=52, key_h=45)
+        layout.addWidget(self._keyboard_widget)
+
+        # ---- Instruction label ----
         instructions = QLabel(
             "Map keys to a tag. You can enter multiple keys per row like '5,q' or '5q'.\n"
             "Reserved navigation keys (Left/Right/Space/Enter) are not allowed."
@@ -159,6 +319,10 @@ class HotkeyConfigDialog(QDialog):
             keys_text = ",".join(keys)
             self._add_row(keys_text, tag)
 
+        # Connect table edits to live keyboard preview (block signals during
+        # programmatic insertions to avoid redundant refreshes)
+        self.table.cellChanged.connect(self._refresh_keyboard_preview)
+
         layout.addWidget(self.table)
 
         # Row management buttons
@@ -178,8 +342,29 @@ class HotkeyConfigDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        self.setMinimumWidth(460)
-        self.setMinimumHeight(320)
+        # Wide enough to comfortably display the keyboard (52 px × 12 keys + offsets)
+        self.setMinimumWidth(760)
+        self.setMinimumHeight(560)
+
+    # ------------------------------------------------------------------
+    # Keyboard preview refresh (silent – no warning dialogs)
+    # ------------------------------------------------------------------
+
+    def _refresh_keyboard_preview(self) -> None:
+        """Re-parse the table silently and update the keyboard preview."""
+        preview_map: Dict[str, str] = {}
+        for row in range(self.table.rowCount()):
+            key_item = self.table.item(row, 0)
+            tag_item = self.table.item(row, 1)
+            if not key_item or not tag_item:
+                continue
+            tag = (tag_item.text() or "").strip()
+            if not tag:
+                continue
+            for k in parse_keys_field(key_item.text()):
+                if k not in RESERVED_CHARS:
+                    preview_map[k] = tag  # last-row-wins, silently
+        self._keyboard_widget.update_map(preview_map)
 
     def _add_row(self, keys: str = "", tag: str = "") -> None:
         row = self.table.rowCount()
@@ -275,7 +460,8 @@ class HotkeyTagger(QMainWindow):
 
     def _init_ui(self) -> None:
         self.setWindowTitle("HotkeyTagger")
-        self.setMinimumSize(900, 650)
+        # Expanded minimum size to accommodate the QWERTY keyboard panel.
+        self.setMinimumSize(950, 900)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -340,11 +526,22 @@ class HotkeyTagger(QMainWindow):
         tags_row.addWidget(self.tags_display, stretch=1)
         main_layout.addLayout(tags_row)
 
-        # ---- Hotkey hint ----
+        # ---- Hotkey hint (compact text summary) ----
         self.hotkey_hint = QLabel("")
         self.hotkey_hint.setWordWrap(True)
         self.hotkey_hint.setStyleSheet("color: #666; font-size: 9pt;")
         main_layout.addWidget(self.hotkey_hint)
+
+        # ---- QWERTY keyboard panel ----
+        kb_header = QLabel("Hotkeys (click a highlighted key to apply its tag):")
+        kb_header.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        main_layout.addWidget(kb_header)
+
+        self._keyboard_widget = KeyboardWidget(
+            self.settings.hotkey_map, parent=self
+        )
+        self._keyboard_widget.key_clicked.connect(self._on_keyboard_key_clicked)
+        main_layout.addWidget(self._keyboard_widget)
 
         # ---- Status bar ----
         self.status_bar = QStatusBar()
@@ -722,6 +919,18 @@ class HotkeyTagger(QMainWindow):
             self.hotkey_hint.setText(
                 'No hotkeys configured. Click "Configure Hotkeys" to set them up.'
             )
+        # Keep the keyboard panel in sync
+        self._keyboard_widget.update_map(self.settings.hotkey_map)
+
+    # ------------------------------------------------------------------ #
+    # Keyboard panel interactions
+    # ------------------------------------------------------------------ #
+
+    def _on_keyboard_key_clicked(self, key: str) -> None:
+        """Apply/remove the tag bound to *key* on the current image."""
+        tag = self.settings.hotkey_map.get(key)
+        if tag:
+            self._toggle_tag(tag)
 
     # ------------------------------------------------------------------ #
     # Close event
