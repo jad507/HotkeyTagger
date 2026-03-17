@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QKeySequence
@@ -336,6 +336,30 @@ class HotkeyConfigDialog(QDialog):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # Sorting and import controls
+        sort_row = QHBoxLayout()
+        sort_az_btn = QPushButton("Sort A→Z (Tag)", self)
+        sort_az_btn.setToolTip("Sort rows alphabetically by tag name")
+        sort_az_btn.clicked.connect(self._sort_by_tag)
+        sort_key_btn = QPushButton("Sort by Key (Keyboard Order)", self)
+        sort_key_btn.setToolTip(
+            "Sort rows by keyboard position of their first key "
+            "(numbers row → QWERTY row → ASDF row → ZXCV row)"
+        )
+        sort_key_btn.clicked.connect(self._sort_by_key)
+        load_btn = QPushButton("Load Hotkeys from File…", self)
+        load_btn.setToolTip(
+            "Import hotkey bindings from a hotkeys.json file "
+            "(e.g. copied from a previous image folder)"
+        )
+        load_btn.clicked.connect(self._load_from_file)
+        sort_row.addWidget(sort_az_btn)
+        sort_row.addWidget(sort_key_btn)
+        sort_row.addSpacing(16)
+        sort_row.addWidget(load_btn)
+        sort_row.addStretch()
+        layout.addLayout(sort_row)
+
         # OK / Cancel
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
         buttons.accepted.connect(self.accept)
@@ -384,6 +408,105 @@ class HotkeyConfigDialog(QDialog):
             for row in range(r.topRow(), r.bottomRow() + 1):
                 if 0 <= row < self.table.rowCount():
                     self.table.removeRow(row)
+
+    # ------------------------------------------------------------------
+    # Table helpers: extract, populate, sort, and import
+    # ------------------------------------------------------------------
+
+    def _extract_rows(self) -> List[Tuple[str, str]]:
+        """Return all table rows as a list of (keys_text, tag_text) tuples."""
+        rows: List[Tuple[str, str]] = []
+        for row in range(self.table.rowCount()):
+            key_item = self.table.item(row, 0)
+            tag_item = self.table.item(row, 1)
+            rows.append((
+                key_item.text() if key_item else "",
+                tag_item.text() if tag_item else "",
+            ))
+        return rows
+
+    def _populate_table(self, rows: List[Tuple[str, str]]) -> None:
+        """Replace all table contents with the given (keys_text, tag_text) rows."""
+        self.table.blockSignals(True)
+        self.table.setRowCount(0)
+        for keys, tag in rows:
+            self._add_row(keys, tag)
+        self.table.blockSignals(False)
+        self._refresh_keyboard_preview()
+
+    def _sort_by_tag(self) -> None:
+        """Sort table rows alphabetically by tag name (case-insensitive)."""
+        rows = self._extract_rows()
+        rows.sort(key=lambda r: r[1].lower())
+        self._populate_table(rows)
+
+    def _sort_by_key(self) -> None:
+        """Sort table rows by the keyboard position of their first assigned key.
+
+        The order follows: numbers row (1–0), QWERTY row, ASDF row, ZXCV row,
+        then any remaining characters, then rows with no recognised keys last.
+        """
+        rows = self._extract_rows()
+
+        def _key_order(row: Tuple[str, str]) -> Tuple[int, str]:
+            keys = parse_keys_field(row[0])
+            if keys:
+                # Use the position of the lowest-order key in the row
+                order = min(KEYBOARD_ORDER.get(k, len(KEYBOARD_ORDER)) for k in keys)
+            else:
+                order = len(KEYBOARD_ORDER)  # sort unrecognised keys to the end
+            return (order, row[1].lower())
+
+        rows.sort(key=_key_order)
+        self._populate_table(rows)
+
+    def _load_from_file(self) -> None:
+        """Import hotkey bindings from a user-chosen hotkeys.json file.
+
+        The current table contents are *replaced* by the imported bindings.
+        """
+        path_str, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Hotkeys from File",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path_str:
+            return
+
+        try:
+            data = json.loads(Path(path_str).read_text(encoding="utf-8"))
+        except Exception as exc:
+            QMessageBox.warning(self, "Load Hotkeys", f"Could not read file:\n{exc}")
+            return
+
+        if not isinstance(data, dict):
+            QMessageBox.warning(
+                self, "Load Hotkeys", "Invalid format – expected a JSON object."
+            )
+            return
+
+        # Normalise to lowercase single-char keys (same logic as _load_folder_hotkeys)
+        hotkey_map: Dict[str, str] = {
+            str(k).lower(): str(v)
+            for k, v in data.items()
+            if len(str(k)) == 1
+        }
+
+        if not hotkey_map:
+            QMessageBox.information(
+                self, "Load Hotkeys", "No valid single-key bindings found in the file."
+            )
+            return
+
+        # Rebuild the table from the imported map
+        by_tag = group_keys_by_tag(hotkey_map)
+        rows: List[Tuple[str, str]] = [(",".join(keys), tag) for tag, keys in by_tag.items()]
+        self._populate_table(rows)
+
+    # ------------------------------------------------------------------
+    # Hotkey map extraction
+    # ------------------------------------------------------------------
 
     def get_hotkey_map(self) -> Dict[str, str]:
         """
