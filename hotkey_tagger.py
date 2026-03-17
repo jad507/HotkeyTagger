@@ -619,20 +619,25 @@ class HotkeyTagger(QMainWindow):
 
         # ---- Navigation row ----
         nav = QHBoxLayout()
-        prev_btn = QPushButton("◀ Prev")
-        prev_btn.clicked.connect(self.prev_image)
+        self.first_btn = QPushButton("⏮ First")
+        self.first_btn.clicked.connect(self.first_image)
+
+        # Keep a reference so the label can be toggled by _on_next_mode_changed
+        self.prev_btn = QPushButton("◀ Prev")
+        self.prev_btn.clicked.connect(self.prev_action)
 
         self.next_btn = QPushButton("Next ▶")  # keep a reference; we change its label
         self.next_btn.clicked.connect(self.next_action)
 
-        # NEW: checkbox to toggle "next untagged" mode
+        # Checkbox to toggle "untagged" mode for both Prev and Next
         self.chk_next_untagged = QCheckBox("Next = untagged")
         self.chk_next_untagged.stateChanged.connect(self._on_next_mode_changed)
 
         self.progress_label = QLabel("0 / 0")
         self.progress_label.setAlignment(Qt.AlignCenter)
 
-        nav.addWidget(prev_btn)
+        nav.addWidget(self.first_btn)
+        nav.addWidget(self.prev_btn)
         nav.addWidget(self.progress_label, stretch=1)
         nav.addWidget(self.chk_next_untagged)  # <-- add checkbox in the row
         nav.addWidget(self.next_btn)
@@ -680,7 +685,7 @@ class HotkeyTagger(QMainWindow):
             self._shortcuts.append(sc)
 
         # Previous / Next
-        add("Left", self.prev_image)
+        add("Left", self.prev_action)
         add("Right", self.next_action)
 
         # Also advance with Space and Enter/Return
@@ -861,11 +866,45 @@ class HotkeyTagger(QMainWindow):
     # Navigation
     # ------------------------------------------------------------------ #
 
+    def first_image(self) -> None:
+        if self.image_files and self.current_index != 0:
+            self.current_index = 0
+            self._show_current_image()
+            self.settings.last_image_index = self.current_index
+
     def prev_image(self) -> None:
         if self.image_files and self.current_index > 0:
             self.current_index -= 1
             self._show_current_image()
             self.settings.last_image_index = self.current_index
+
+    def prev_action(self) -> None:
+        """Delegate to sequential prev or prev-untagged based on checkbox."""
+        if self.chk_next_untagged.isChecked():
+            self.prev_untagged()
+        else:
+            self.prev_image()
+
+    def prev_untagged(self) -> None:
+        """Jump to the previous image (before current) that has no tags."""
+        if not self.image_files:
+            return
+
+        end = self.current_index - 1
+        found = None
+        for i in range(end, -1, -1):
+            rel = self._relpath_for_index(i)
+            if rel is not None and not self.tags_dict.get(rel, []):
+                found = i
+                break
+
+        if found is None:
+            self.status_bar.showMessage("No untagged images before current")
+            return
+
+        self.current_index = found
+        self._show_current_image()
+        self.settings.last_image_index = self.current_index
 
     def next_image(self) -> None:
         if self.image_files and self.current_index < len(self.image_files) - 1:
@@ -874,11 +913,13 @@ class HotkeyTagger(QMainWindow):
             self.settings.last_image_index = self.current_index
 
     def _on_next_mode_changed(self, state) -> None:
-        """Update the Next button label when the mode changes."""
+        """Update the Prev and Next button labels when the mode changes."""
         if self.chk_next_untagged.isChecked():
+            self.prev_btn.setText("◀ Prev Untagged")
             self.next_btn.setText("Next Untagged ▶")
             self.status_bar.showMessage("Next mode: jump to next untagged image")
         else:
+            self.prev_btn.setText("◀ Prev")
             self.next_btn.setText("Next ▶")
             self.status_bar.showMessage("Next mode: sequential")
 
