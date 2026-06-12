@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -33,7 +34,7 @@ def test_save_and_load_roundtrip():
     s.last_csv_path = "/data/images/tags.csv"
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
 
     try:
         s.save(path)
@@ -47,12 +48,12 @@ def test_save_and_load_roundtrip():
         assert s2.last_image_index == 42
         assert s2.last_csv_path == "/data/images/tags.csv"
     finally:
-        os.unlink(path)
+        path.unlink()
 
 
 def test_load_returns_false_for_missing_file():
     s = HotkeySettings()
-    assert s.load("/nonexistent/path/settings.json") is False
+    assert s.load(Path("/nonexistent/path/settings.json")) is False
 
 
 def test_load_returns_false_for_corrupt_json():
@@ -60,19 +61,19 @@ def test_load_returns_false_for_corrupt_json():
         suffix=".json", delete=False, mode="w"
     ) as f:
         f.write("not valid json {{")
-        path = f.name
+        path = Path(f.name)
     try:
         s = HotkeySettings()
         assert s.load(path) is False
     finally:
-        os.unlink(path)
+        path.unlink()
 
 
 def test_save_produces_valid_json():
     s = HotkeySettings()
     s.hotkey_map = {"n": "nebula"}
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
     try:
         s.save(path)
         with open(path) as fh:
@@ -82,7 +83,7 @@ def test_save_produces_valid_json():
         assert "last_image_index" in data
         assert "last_csv_path" in data
     finally:
-        os.unlink(path)
+        path.unlink()
 
 
 def test_load_partial_json_uses_defaults():
@@ -91,7 +92,7 @@ def test_load_partial_json_uses_defaults():
         suffix=".json", delete=False, mode="w"
     ) as f:
         json.dump({"hotkey_map": {"x": "xray"}}, f)
-        path = f.name
+        path = Path(f.name)
     try:
         s = HotkeySettings()
         assert s.load(path) is True
@@ -100,14 +101,14 @@ def test_load_partial_json_uses_defaults():
         assert s.last_image_index == 0
         assert s.last_csv_path is None
     finally:
-        os.unlink(path)
+        path.unlink()
 
 
 def test_hotkey_map_survives_multiple_saves():
     s = HotkeySettings()
     s.hotkey_map = {"a": "asteroid", "b": "binary_star"}
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
-        path = f.name
+        path = Path(f.name)
     try:
         s.save(path)
         s.hotkey_map["c"] = "comet"
@@ -117,4 +118,4 @@ def test_hotkey_map_survives_multiple_saves():
         s2.load(path)
         assert s2.hotkey_map == {"a": "asteroid", "b": "binary_star", "c": "comet"}
     finally:
-        os.unlink(path)
+        path.unlink()

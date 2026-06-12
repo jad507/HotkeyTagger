@@ -35,9 +35,11 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -48,11 +50,18 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QShortcut,
-    QCheckBox
+    QCheckBox,
 )
 
 from csv_manager import load_tags, repair_csv, save_tags
 from settings import DEFAULT_SETTINGS_PATH, HotkeySettings
+from comfyui_reader import (
+    ComfyUIMetadata,
+    load_danbooru_tags,
+    match_danbooru_tags,
+    read_metadata,
+)
+from comfyui_params_manager import ComfyUIParamsRecord, upsert_param
 
 
 # --------------------------------------------------------------------------- #
@@ -64,6 +73,10 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".
 
 # Per-folder hotkeys file name
 HOTKEYS_FILENAME = "hotkeys.json"
+
+# ComfyUI integration
+_DANBOORU_TAGS_PATH: Path = Path(__file__).parent / "comfyui" / "danbooru_tags.txt"
+_COMFYUI_PARAMS_FILENAME = "comfyui_params.csv"
 
 
 # --------------------------------------------------------------------------- #
@@ -425,6 +438,255 @@ class HotkeyConfigDialog(QDialog):
 
 
 # --------------------------------------------------------------------------- #
+# ComfyUI metadata dialog
+# --------------------------------------------------------------------------- #
+
+class ComfyUITagDialog(QDialog):
+    """Dialog showing ComfyUI generation parameters with editable fields and selectable tags.
+
+    Left panel: editable generation params (steps, sampler, scheduler, CFG, denoise).
+    Middle panel: editable model names; LoRA table with name, strength, and checkbox to add as tag.
+    Right panel: scrollable list of Danbooru-matched prompt tags with checkboxes.
+
+    On accept, call :meth:`get_params_record` for the numeric params and
+    :meth:`get_selected_tags` for the boolean tags to apply.
+    """
+
+    def __init__(
+        self,
+        metadata: ComfyUIMetadata,
+        matched_tags: List[str],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("ComfyUI Metadata")
+        self._metadata = metadata
+        self._matched_tags = matched_tags
+        self._tag_checkboxes: List[QCheckBox] = []
+        self._model_edits: List[QLineEdit] = []
+        self._lora_table: Optional[QTableWidget] = None
+        self._steps_edit: QLineEdit
+        self._sampler_edit: QLineEdit
+        self._scheduler_edit: QLineEdit
+        self._cfg_edit: QLineEdit
+        self._denoise_edit: QLineEdit
+        self._init_ui()
+        self.setMinimumSize(960, 620)
+
+    # ------------------------------------------------------------------ #
+    # UI construction
+    # ------------------------------------------------------------------ #
+
+    def _init_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        panels = QHBoxLayout()
+
+        panels.addWidget(self._build_params_panel())
+        panels.addWidget(self._build_models_loras_panel())
+        panels.addWidget(self._build_tags_panel(), stretch=1)
+
+        root.addLayout(panels, stretch=1)
+
+        btn_box = QDialogButtonBox()
+        save_btn = QPushButton("Save Params && Apply Tags")
+        save_btn.clicked.connect(self.accept)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        btn_box.addButton(save_btn, QDialogButtonBox.AcceptRole)
+        btn_box.addButton(close_btn, QDialogButtonBox.RejectRole)
+        root.addWidget(btn_box)
+
+    def _bold_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        f = QFont()
+        f.setBold(True)
+        lbl.setFont(f)
+        return lbl
+
+    def _build_params_panel(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(self._bold_label("Generation Parameters"))
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        meta = self._metadata
+        rows = [
+            ("Steps",     str(meta.steps) if meta.steps is not None else ""),
+            ("Sampler",   meta.sampler or ""),
+            ("Scheduler", meta.scheduler or ""),
+            ("CFG",       f"{meta.cfg:.2f}" if meta.cfg is not None else ""),
+            ("Denoise",   f"{meta.denoise:.4f}" if meta.denoise is not None else ""),
+        ]
+        edits = []
+        for i, (label, value) in enumerate(rows):
+            grid.addWidget(QLabel(label + ":"), i, 0)
+            edit = QLineEdit(value)
+            grid.addWidget(edit, i, 1)
+            edits.append(edit)
+
+        self._steps_edit, self._sampler_edit, self._scheduler_edit, \
+            self._cfg_edit, self._denoise_edit = edits
+
+        layout.addWidget(grid_widget)
+        layout.addStretch()
+        return widget
+
+    def _build_models_loras_panel(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(self._bold_label("Models"))
+        for model in (self._metadata.models or []):
+            edit = QLineEdit(model)
+            self._model_edits.append(edit)
+            layout.addWidget(edit)
+        if not self._metadata.models:
+            layout.addWidget(QLabel("(none)"))
+
+        layout.addSpacing(8)
+        layout.addWidget(self._bold_label("LoRAs  (check to add name as tag)"))
+
+        self._lora_table = QTableWidget(0, 3)
+        self._lora_table.setHorizontalHeaderLabels(["Tag?", "LoRA Name", "Strength"])
+        self._lora_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._lora_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self._lora_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._lora_table.setMinimumWidth(340)
+
+        for name, strength in (self._metadata.loras or []):
+            self._add_lora_row(name, strength, checked=False)
+
+        add_btn = QPushButton("Add Row")
+        add_btn.clicked.connect(lambda: self._add_lora_row("", 1.0, checked=False))
+
+        layout.addWidget(self._lora_table, stretch=1)
+        layout.addWidget(add_btn)
+        return widget
+
+    def _add_lora_row(self, name: str, strength: float, checked: bool) -> None:
+        assert self._lora_table is not None
+        row = self._lora_table.rowCount()
+        self._lora_table.insertRow(row)
+
+        cb = QCheckBox()
+        cb.setChecked(checked)
+        cb_container = QWidget()
+        cb_layout = QHBoxLayout(cb_container)
+        cb_layout.addWidget(cb)
+        cb_layout.setAlignment(Qt.AlignCenter)
+        cb_layout.setContentsMargins(0, 0, 0, 0)
+        self._lora_table.setCellWidget(row, 0, cb_container)
+
+        self._lora_table.setItem(row, 1, QTableWidgetItem(name))
+        self._lora_table.setItem(row, 2, QTableWidgetItem(f"{strength:.4f}" if strength else ""))
+
+    def _build_tags_panel(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.addWidget(self._bold_label("Matched Danbooru Tags"))
+
+        sel_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(self._select_all_tags)
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self._clear_all_tags)
+        sel_row.addWidget(select_all_btn)
+        sel_row.addWidget(clear_all_btn)
+        sel_row.addStretch()
+        layout.addLayout(sel_row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        tag_layout = QVBoxLayout(container)
+        for tag in self._matched_tags:
+            cb = QCheckBox(tag)
+            cb.setChecked(True)
+            self._tag_checkboxes.append(cb)
+            tag_layout.addWidget(cb)
+        if not self._matched_tags:
+            tag_layout.addWidget(QLabel("(no Danbooru tags matched)"))
+        tag_layout.addStretch()
+        scroll.setWidget(container)
+        layout.addWidget(scroll, stretch=1)
+        return widget
+
+    def _select_all_tags(self) -> None:
+        for cb in self._tag_checkboxes:
+            cb.setChecked(True)
+
+    def _clear_all_tags(self) -> None:
+        for cb in self._tag_checkboxes:
+            cb.setChecked(False)
+
+    # ------------------------------------------------------------------ #
+    # Result extraction
+    # ------------------------------------------------------------------ #
+
+    def get_params_record(self) -> ComfyUIParamsRecord:
+        """Build a :class:`ComfyUIParamsRecord` from the current field values."""
+        steps: Optional[int] = None
+        try:
+            steps = int(self._steps_edit.text().strip())
+        except (ValueError, AttributeError):
+            pass
+
+        cfg: Optional[float] = None
+        try:
+            cfg = float(self._cfg_edit.text().strip())
+        except (ValueError, AttributeError):
+            pass
+
+        denoise: Optional[float] = None
+        try:
+            denoise = float(self._denoise_edit.text().strip())
+        except (ValueError, AttributeError):
+            pass
+
+        sampler = self._sampler_edit.text().strip() or None
+        scheduler = self._scheduler_edit.text().strip() or None
+        models = [e.text().strip() for e in self._model_edits if e.text().strip()]
+
+        loras: List[tuple] = []
+        if self._lora_table is not None:
+            for row in range(self._lora_table.rowCount()):
+                name_item = self._lora_table.item(row, 1)
+                strength_item = self._lora_table.item(row, 2)
+                name = (name_item.text().strip() if name_item else "")
+                if not name:
+                    continue
+                try:
+                    strength = float(strength_item.text().strip() if strength_item else "")
+                except (ValueError, AttributeError):
+                    strength = 1.0
+                loras.append((name, strength))
+
+        return ComfyUIParamsRecord(
+            steps=steps, cfg=cfg, denoise=denoise,
+            sampler=sampler, scheduler=scheduler,
+            models=models, loras=loras,
+        )
+
+    def get_selected_tags(self) -> List[str]:
+        """Return checked Danbooru tags plus LoRA names whose checkbox is checked."""
+        tags: List[str] = [cb.text() for cb in self._tag_checkboxes if cb.isChecked()]
+        if self._lora_table is not None:
+            for row in range(self._lora_table.rowCount()):
+                cb_container = self._lora_table.cellWidget(row, 0)
+                if cb_container is not None:
+                    cb = cb_container.findChild(QCheckBox)
+                    if cb is not None and cb.isChecked():
+                        name_item = self._lora_table.item(row, 1)
+                        name = (name_item.text().strip() if name_item else "")
+                        if name:
+                            tags.append(name)
+        return tags
+
+
+# --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
 
@@ -480,6 +742,15 @@ class HotkeyTagger(QMainWindow):
             btn = QPushButton(label)
             btn.clicked.connect(slot)
             toolbar.addWidget(btn)
+
+        self._comfyui_btn = QPushButton("ComfyUI Tags")
+        self._comfyui_btn.setEnabled(False)
+        self._comfyui_btn.setToolTip(
+            "Read ComfyUI metadata and fill tags (PNG only)"
+        )
+        self._comfyui_btn.clicked.connect(self._open_comfyui_dialog)
+        toolbar.addWidget(self._comfyui_btn)
+
         toolbar.addStretch()
         main_layout.addLayout(toolbar)
 
@@ -733,6 +1004,7 @@ class HotkeyTagger(QMainWindow):
         self.setWindowTitle(f"HotkeyTagger – {path.name}")
         self._update_tags_display()
         self._update_progress()
+        self._update_comfyui_btn_state()
 
     # ------------------------------------------------------------------ #
     # Navigation
@@ -856,6 +1128,77 @@ class HotkeyTagger(QMainWindow):
                 self.status_bar.showMessage("Hotkeys updated")
             except Exception as e:
                 QMessageBox.critical(self, "Configure Hotkeys", f"Failed to apply hotkeys:\n{e}")
+
+    # ------------------------------------------------------------------ #
+    # ComfyUI metadata
+    # ------------------------------------------------------------------ #
+
+    def _update_comfyui_btn_state(self) -> None:
+        """Enable the ComfyUI Tags button iff current image is a PNG with a prompt chunk."""
+        if not self.image_files:
+            self._comfyui_btn.setEnabled(False)
+            return
+        path = self.image_files[self.current_index]
+        if path.suffix.lower() != ".png":
+            self._comfyui_btn.setEnabled(False)
+            return
+        try:
+            from PIL import Image as PilImage
+            info = PilImage.open(path).info
+            self._comfyui_btn.setEnabled("prompt" in info)
+        except Exception:
+            self._comfyui_btn.setEnabled(False)
+
+    def _open_comfyui_dialog(self) -> None:
+        """Read ComfyUI metadata for the current image and open the tag/params dialog."""
+        if not self.image_files:
+            return
+        path = self.image_files[self.current_index]
+        metadata = read_metadata(path)
+        if metadata is None:
+            QMessageBox.information(
+                self,
+                "ComfyUI Metadata",
+                f"No ComfyUI metadata found in:\n{path.name}",
+            )
+            return
+
+        matched_tags: List[str] = []
+        if _DANBOORU_TAGS_PATH.exists() and metadata.positive_prompt:
+            try:
+                danbooru = load_danbooru_tags(_DANBOORU_TAGS_PATH)
+                matched_tags = match_danbooru_tags(metadata.positive_prompt, danbooru)
+            except Exception as exc:
+                self.status_bar.showMessage(f"Warning: Danbooru matching failed: {exc}")
+
+        dialog = ComfyUITagDialog(metadata, matched_tags, parent=self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        # Save numeric params to comfyui_params.csv
+        rel = self._current_relpath()
+        if rel is not None and self.folder is not None:
+            record = dialog.get_params_record()
+            try:
+                upsert_param(self.folder / _COMFYUI_PARAMS_FILENAME, rel, record)
+            except Exception as exc:
+                self.status_bar.showMessage(f"Warning: could not save params: {exc}")
+
+        # Merge selected boolean tags into tags_dict
+        selected = dialog.get_selected_tags()
+        if selected and rel is not None:
+            existing = self.tags_dict.setdefault(rel, [])
+            added = 0
+            for tag in selected:
+                if tag not in existing:
+                    existing.append(tag)
+                    added += 1
+            self._update_tags_display()
+            self.status_bar.showMessage(
+                f"Saved params — added {added} tag(s) from ComfyUI metadata"
+            )
+        else:
+            self.status_bar.showMessage("Saved ComfyUI params")
 
     # ------------------------------------------------------------------ #
     # Save / export
